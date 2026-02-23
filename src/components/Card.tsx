@@ -14,6 +14,9 @@ export default function Card({ item, userId }: CardProps) {
   const [isCommentModalOpen, setIsCommentModalOpen] = useState(false);
   const [commentsCount, setCommentsCount] = useState(0);
 
+  // ✅ 이미지 확대 모달 상태
+  const [isZoomOpen, setIsZoomOpen] = useState(false);
+
   useEffect(() => {
     // Fetch initial likes
     const fetchLikes = async () => {
@@ -21,7 +24,7 @@ export default function Card({ item, userId }: CardProps) {
         const res = await fetch("/api/likes");
         if (res.ok) {
           const data = await res.json();
-          const itemLikes = data.find((l: any) => l.content_id === item.id);
+          const itemLikes = data.find((l: any) => l.content_id == item.id);
           if (itemLikes) {
             setLikes(itemLikes.count);
           }
@@ -54,32 +57,58 @@ export default function Card({ item, userId }: CardProps) {
     }
   }, [item.id]);
 
+  // ✅ ESC로 확대 모달 닫기
+  useEffect(() => {
+    if (!isZoomOpen) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsZoomOpen(false);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    // 스크롤 잠금(선택이지만 UX 좋아짐)
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [isZoomOpen]);
+
   const handleLike = async () => {
     // Optimistic update
-    const newIsLiked = !isLiked;
-    setIsLiked(newIsLiked);
-    setLikes((prev) => (newIsLiked ? prev + 1 : prev - 1));
+    const newLiked = !isLiked;
+    setIsLiked(newLiked);
+    setLikes((prev) => (newLiked ? prev + 1 : Math.max(0, prev - 1)));
 
     // Update local storage
     const likedItems = JSON.parse(localStorage.getItem("likedItems") || "{}");
-    if (newIsLiked) {
+    if (newLiked) {
       likedItems[item.id] = true;
     } else {
       delete likedItems[item.id];
     }
     localStorage.setItem("likedItems", JSON.stringify(likedItems));
 
+    // Send request to server
     try {
-      await fetch(`/api/likes/${item.id}`, {
+      const res = await fetch(`/api/likes/${item.id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId }),
       });
+
+      if (!res.ok) {
+        // Rollback if failed
+        setIsLiked(!newLiked);
+        setLikes((prev) => (newLiked ? Math.max(0, prev - 1) : prev + 1));
+      }
     } catch (err) {
       console.error(err);
-      // Revert on failure
-      setIsLiked(!newIsLiked);
-      setLikes((prev) => (!newIsLiked ? prev + 1 : prev - 1));
+      // Rollback if failed
+      setIsLiked(!newLiked);
+      setLikes((prev) => (newLiked ? Math.max(0, prev - 1) : prev + 1));
     }
   };
 
@@ -101,18 +130,66 @@ export default function Card({ item, userId }: CardProps) {
             </div>
           );
         }
-        const imageUrl = item.thumbnailUrl
+
+        // ✅ 리스트에서는 썸네일(빠름)
+        const thumbUrl = item.thumbnailUrl
           ? item.thumbnailUrl.replace(/=s\d+/, "=s1000")
           : "";
+
+        /**
+         * ✅ 확대(고화질)에서는 원본 우선
+         * 1) webContentLink가 있으면 우선 사용 (대체로 원본/큰 파일 접근)
+         * 2) 혹시 webContentLink가 없거나 제한되면 drive uc 링크로 fallback
+         * 3) 그래도 안 되면 thumbnail을 아주 크게(=s4000) 시도
+         */
+        const driveViewUrl = item.id
+          ? `https://drive.google.com/uc?export=view&id=${item.id}`
+          : "";
+
+        const fallbackBigThumb = item.thumbnailUrl
+          ? item.thumbnailUrl.replace(/=s\d+/, "=s4000")
+          : "";
+
+        const fullUrl =
+          item.webContentLink || driveViewUrl || fallbackBigThumb || thumbUrl;
+
         return (
-          <div className="relative w-full overflow-hidden rounded-t-2xl bg-[#F0EBE1]">
-            <img
-              src={imageUrl}
-              alt={item.name || "추억 사진"}
-              loading="lazy"
-              className="w-full h-auto object-cover"
-            />
-          </div>
+          <>
+            <div className="relative w-full overflow-hidden rounded-t-2xl bg-[#F0EBE1]">
+              <img
+                src={thumbUrl || fullUrl}
+                alt={item.name || "추억 사진"}
+                loading="lazy"
+                className="w-full h-auto object-cover cursor-zoom-in"
+                onClick={() => setIsZoomOpen(true)}
+              />
+            </div>
+
+            {/* ✅ 같은 창에서 크게 보기: 확대 모달 */}
+            {isZoomOpen && (
+              <div
+                onClick={() => setIsZoomOpen(false)}
+                className="fixed inset-0 z-[9999] flex items-center justify-center p-4"
+                style={{
+                  background: "rgba(0,0,0,0.75)",
+                  cursor: "zoom-out",
+                }}
+              >
+                <img
+                  src={fullUrl}
+                  alt={item.name || "확대 이미지"}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    maxWidth: "95vw",
+                    maxHeight: "95vh",
+                    objectFit: "contain",
+                    borderRadius: 12,
+                    background: "white",
+                  }}
+                />
+              </div>
+            )}
+          </>
         );
 
       case "memo":
@@ -130,12 +207,10 @@ export default function Card({ item, userId }: CardProps) {
       case "quote":
         return (
           <div className="p-8 bg-[#5C4D43] rounded-t-2xl text-[#FDFBF7] flex flex-col items-center justify-center text-center min-h-[200px]">
-            <p className="text-xl font-serif italic mb-4 leading-relaxed">
-              "{item.text}"
+            <p className="text-xl font-semibold italic leading-relaxed mb-4">
+              “{item.text}”
             </p>
-            <p className="text-sm font-medium text-[#D4A373]">
-              - {item.personName}
-            </p>
+            <span className="text-sm opacity-80">— {item.personName}</span>
           </div>
         );
 
@@ -145,50 +220,40 @@ export default function Card({ item, userId }: CardProps) {
   };
 
   return (
-    <>
-      <div className="bg-white rounded-2xl shadow-sm border border-[#F0EBE1] overflow-hidden transition-all hover:shadow-md">
-        {renderContent()}
+    <div className="w-full max-w-xl mx-auto bg-[#FDFBF7] rounded-2xl shadow-sm border border-[#E8E3D9] overflow-hidden">
+      {renderContent()}
 
-        <div className="p-4 flex items-center justify-between bg-white">
-          <div className="flex items-center gap-4">
-            <button
-              onClick={handleLike}
-              className="flex items-center gap-1.5 text-[#8A7E73] hover:text-[#E07A5F] transition-colors group"
-            >
-              <Heart
-                size={20}
-                className={`transition-all ${isLiked ? "fill-[#E07A5F] text-[#E07A5F] scale-110" : "group-hover:scale-110"}`}
-              />
-              <span
-                className={`text-sm font-medium ${isLiked ? "text-[#E07A5F]" : ""}`}
-              >
-                {likes > 0 ? likes : ""}
-              </span>
-            </button>
+      <div className="p-4 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={handleLike}
+            className="flex items-center gap-2 text-[#8A7E73] hover:text-[#5C4D43] transition"
+            aria-label="like"
+          >
+            <Heart
+              size={20}
+              className={isLiked ? "fill-[#E76F51] text-[#E76F51]" : ""}
+            />
+            <span className="text-sm">{likes}</span>
+          </button>
 
-            <button
-              onClick={() => setIsCommentModalOpen(true)}
-              className="flex items-center gap-1.5 text-[#8A7E73] hover:text-[#5C4D43] transition-colors group"
-            >
-              <MessageCircle
-                size={20}
-                className="group-hover:scale-110 transition-transform"
-              />
-              <span className="text-sm font-medium">
-                {commentsCount > 0 ? commentsCount : ""}
-              </span>
-            </button>
-          </div>
+          <button
+            onClick={() => setIsCommentModalOpen(true)}
+            className="flex items-center gap-2 text-[#8A7E73] hover:text-[#5C4D43] transition"
+            aria-label="comment"
+          >
+            <MessageCircle size={20} />
+            <span className="text-sm">{commentsCount}</span>
+          </button>
         </div>
       </div>
 
-      {isCommentModalOpen && (
-        <CommentModal
-          contentId={item.id}
-          onClose={() => setIsCommentModalOpen(false)}
-          onCommentAdded={() => setCommentsCount((prev) => prev + 1)}
-        />
-      )}
-    </>
+      {/* 댓글 모달 */}
+      <CommentModal
+        isOpen={isCommentModalOpen}
+        onClose={() => setIsCommentModalOpen(false)}
+        contentId={item.id}
+      />
+    </div>
   );
 }
